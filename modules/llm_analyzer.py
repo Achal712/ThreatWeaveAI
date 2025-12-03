@@ -53,7 +53,7 @@ def analyze_with_sage(context):
 
     prompt = f"""
         You are a cybersecurity analyst LLM. Analyze the input and return JSON only with fields:
-        Type of Attack (Taxonomy_list: Account Takeover, Conversation Hijacking, Business Email Compromise (BEC), Phishing, Spam - Scamming, Extortion), is_phishing (bool), phishing_type (string), confidence_score (0-100),
+        Type of Attack (Taxonomy_list: Account Takeover, Conversation Hijacking, Business Email Compromise (BEC), Phishing, Spam , Extortion), is_phishing (bool), phishing_type (string), confidence_score (0-100),
         Brief_summary (Generate a brief summary (1-2 paragraph) that includes key details about the topic and incorporates local_findings. The summary should be professional,technical,concise, informative, and context-aware.), techniques (list), ioc_domains (list),
         recommended_actions (list of strings 2-3), URL_Evasion Techniques (list of strings), regex_indicator (list of objects), Phaas_kit (string),prompt_tokens(integer),completion_tokens(integer),total_tokens(integer).
 
