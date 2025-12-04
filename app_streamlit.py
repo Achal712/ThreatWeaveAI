@@ -18,7 +18,8 @@ from modules.tls_enrich import get_cert_info
 from modules.oauth_analyzer import analyze_oauth_url
 from modules.llm_analyzer import analyze_with_sage
 from modules.virustotal_enrich import vt_url_lookup_sync
-
+from modules.redirect_resolver import resolve_url
+from urllib.parse import urlparse
 # Optional helpers
 try:
     from modules.attachments_scanner import scan_attachment_bytes
@@ -508,7 +509,7 @@ def build_professional_report_from_export(out: Dict[str, Any]) -> str:
                 lines.append(f"- Size: {fsize}")
                 lines.append(f"- sha256: {fsha}")
                 lines.append(
-                    f"- VT Malicious: {sc.get('malicious', 'N/A')}, Suspicious: {sc.get('suspicious', 'N/A')}, Undetected: {sc.get('undetected','N/A')}, Harmless: {sc.get('harmless','N/A')}"
+                    f"- VT Malicious: {sc.get('malicious', 'N/A')}\n Suspicious: {sc.get('suspicious', 'N/A')}\n Undetected: {sc.get('undetected','N/A')}\n Harmless: {sc.get('harmless','N/A')}\n"
                 )
                 lines.append(
                     f"- Flagged Vendors: {', '.join(flagged) if flagged else 'None'}"
@@ -622,6 +623,7 @@ def build_professional_report_from_export(out: Dict[str, Any]) -> str:
                 lines.append(f"- Redirect Host : {oa.get('redirect_host')}")
             lines.append(f"- Client Id : {client_id}")
             lines.append("\n")
+            
 
     # WHOIS summary (collect domains if present across enrichment)
     lines.append("## WhoIs Data (summary)\n")
@@ -764,8 +766,11 @@ if uploaded is not None:
                 f"{a.get('filename')} — {a.get('content_type')} — {a.get('size', 0)} bytes — sha256: {a.get('sha256')}"
             )
 
-    # ---------------- ONE BUTTON: local + LLM + report ----------------
+    # ---------------- ONE BUTTON: local + LLM + report (REWRITTEN with redirect resolution) ----------------
     if st.button("Analyze & Generate Report"):
+        from modules.redirect_resolver import resolve_url
+        from urllib.parse import urlparse
+
         findings: Dict[str, Any] = {}
         enrich: Dict[str, Any] = {}
         oauths: Dict[str, Any] = {}
@@ -786,23 +791,22 @@ if uploaded is not None:
             total_items = max(1, len(urls))
             idx = 0
             st.info(
-                "Running local checks (URL evasion, OAuth, WHOIS, TLS, VirusTotal, MX blacklist, attachments)..."
+                "Running local checks (URL evasion, OAuth, redirect resolution, WHOIS, TLS, VirusTotal, MX blacklist, attachments)..."
             )
 
-            # Per-URL analysis
+            # Per-URL analysis (with redirect resolution + final-domain enrichment)
             for u in urls:
                 idx += 1
-                try:
-                    findings[u] = detect_evasion_techniques(u)
-                except Exception as e:
-                    findings[u] = {
-                        "error": f"detect_evasion_techniques_error: {str(e)}"
-                    }
-
                 enrich.setdefault(u, {})
                 oauths.setdefault(u, {})
 
-                # OAuth analysis
+                # Local evasion heuristics (run on original URL)
+                try:
+                    findings[u] = detect_evasion_techniques(u)
+                except Exception as e:
+                    findings[u] = {"error": f"detect_evasion_techniques_error: {str(e)}"}
+
+                # OAuth analysis on original URL (preserve original evidence)
                 try:
                     oa = analyze_oauth_url(u)
                     oauths[u] = oa
@@ -810,41 +814,51 @@ if uploaded is not None:
                     oauths[u] = {"error": str(e)}
                     oa = {}
 
-                # Only perform WHOIS / TLS for redirect_host
-                redirect_host = None
+                # Redirect resolution: attempt to resolve to final landing URL
                 try:
-                    redirect_host = oa.get("redirect_host") if isinstance(oa, dict) else None
-                except Exception:
-                    redirect_host = None
-
-                if redirect_host:
-                    try:
-                        enrich[u]["whois"] = whois_lookup(redirect_host)
-                    except Exception as e:
-                        enrich[u]["whois"] = {"error": str(e)}
-
-                    try:
-                        enrich[u]["tls"] = get_cert_info(redirect_host)
-                    except Exception as e:
-                        enrich[u]["tls"] = {"error": str(e)}
-                else:
-                    enrich[u]["whois"] = {"note": "whois_skipped_no_redirect_host"}
-                    enrich[u]["tls"] = {"note": "tls_skipped_no_redirect_host"}
-
-                # VirusTotal enrichment
-                try:
-                    vt_res = vt_url_lookup_sync(u)
-                    enrich[u]["virustotal"] = vt_res
+                    final = resolve_url(u)
+                    enrich[u]["resolved_final"] = final
                 except Exception as e:
-                    enrich[u]["virustotal"] = {
-                        "vt_verified": False,
-                        "error": str(e),
-                    }
+                    enrich[u]["resolved_final_error"] = str(e)
+                    final = None
 
+                # If we resolved a final landing URL, run VirusTotal on the final URL
+                # and run WHOIS/TLS enrichment on the final domain only (privacy-preserving).
+                if final:
+                    try:
+                        vt_res = vt_url_lookup_sync(final)
+                        enrich[u]["virustotal"] = vt_res
+                    except Exception as e:
+                        enrich[u]["virustotal"] = {"vt_verified": False, "error": str(e)}
+
+                    try:
+                        final_host = urlparse(final).netloc
+                    except Exception:
+                        final_host = None
+
+                    if final_host:
+                        try:
+                            enrich[u]["whois"] = whois_lookup(final_host)
+                        except Exception as e:
+                            enrich[u]["whois"] = {"error": str(e)}
+
+                        try:
+                            enrich[u]["tls"] = get_cert_info(final_host)
+                        except Exception as e:
+                            enrich[u]["tls"] = {"error": str(e)}
+                    else:
+                        enrich[u]["whois"] = {"note": "final_host_unparsable"}
+                        enrich[u]["tls"] = {"note": "final_host_unparsable"}
+                else:
+                    # Resolution failed: mark enrichment as skipped for privacy/clarity
+                    enrich[u]["virustotal"] = {"note": "resolution_failed"}
+                    enrich[u]["whois"] = {"note": "resolution_failed"}
+                    enrich[u]["tls"] = {"note": "resolution_failed"}
+
+                # Update progress (avoid blocking sleeps — keep UI responsive)
                 progress.progress(int((idx / total_items) * 100))
-                time.sleep(0.03)
 
-            # Attachments scanning via VirusTotal
+            # Attachments scanning via VirusTotal (unchanged)
             if eml_attachments:
                 st.info("Scanning attachments with VirusTotal (may take a while)...")
                 for i, att in enumerate(eml_attachments, start=1):
@@ -872,16 +886,13 @@ if uploaded is not None:
                     except Exception as e:
                         attachments_info[fname]["virustotal"] = {"error": str(e)}
                     st.write(f"[{i}/{len(eml_attachments)}] {fname}: scanned")
-                    time.sleep(0.02)
 
-            # Source IP MXToolbox blacklist check
+            # Source IP MXToolbox blacklist check (unchanged)
             src_ip = email_data.get("source_ip") or email_data.get("headers", {}).get(
                 "X-BESS-Apparent-Source-IP"
             )
             if src_ip:
-                st.info(
-                    f"Checking source IP ({src_ip}) against MXToolbox blacklists..."
-                )
+                st.info(f"Checking source IP ({src_ip}) against MXToolbox blacklists...")
                 try:
                     source_ip_check = mx_blacklists_sync(src_ip)
                 except Exception as e:
@@ -890,6 +901,7 @@ if uploaded is not None:
                 source_ip_check = {"note": "no_source_ip_found"}
 
             # Store local results in session_state
+                        # Store local results in session_state
             local_findings = {
                 "findings": findings,
                 "enrichment": enrich,
@@ -906,6 +918,35 @@ if uploaded is not None:
                 },
                 "run_at": int(time.time()),
             }
+
+            malicious_found = False
+            malicious_final_links = []
+
+            for url, info in local_findings.get("enrichment", {}).items():
+                vt_obj = info.get("virustotal") or {}
+                verdict = (
+                    vt_obj.get("verdict")
+                    or vt_obj.get("result")
+                    or vt_obj.get("vt_verdict")
+                    or "unknown"
+                )
+
+                if verdict == "malicious":
+                    malicious_found = True
+                    final_url = info.get("resolved_final") or url
+                    malicious_final_links.append(final_url)
+
+            # ---------------------------------------------
+            # SET is_phishing VARIABLE BASED ON MALICIOUS LINKS
+            # ---------------------------------------------
+            if malicious_found:
+                prompt_obj_extra = {
+                    "is_phishing": "malicious_link_with_wrapper_is_shared",
+                    "malicious_final_links": malicious_final_links,
+                }
+            else:
+                prompt_obj_extra = {}
+
             st.session_state["local_findings"] = local_findings
 
             # Display local outputs
@@ -966,6 +1007,8 @@ if uploaded is not None:
 
             # -------------- LLM: Sage reasoning --------------
             st.subheader("LLM Reasoning")
+
+            # Build context for LLM: note the fix here — unpack prompt_obj_extra
             ctx = {
                 "subject": local_findings.get("email_metadata", {}).get("subject"),
                 "from": local_findings.get("email_metadata", {}).get("from"),
@@ -978,7 +1021,9 @@ if uploaded is not None:
                 "oauths": local_findings.get("oauths", {}),
                 "attachments": local_findings.get("attachments", {}),
                 "source_ip_check": local_findings.get("source_ip_check", {}),
+                **prompt_obj_extra,   # <- CORRECT: unpack the extra fields here
             }
+
             with st.spinner("Contacting Sage LLM..."):
                 try:
                     llm = analyze_with_sage(ctx)
