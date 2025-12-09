@@ -412,7 +412,7 @@ def build_professional_report_from_export(out: Dict[str, Any]) -> str:
     lines.append(f"**This is a {attack_type} email**\n")
     lines.append(f"**Subject**: {em.get('subject') or 'N/A'}\n")
     lines.append(f"**From**: {em.get('from') or 'N/A'}\n")
-    lines.append(f"**To**: {em.get('to') or 'N/A'}\n")
+    lines.append(f"**To**: {em.get('to') or em.get('To') or 'N/A'}\n")
     lines.append(f"**Source Ip**: {em.get('source_ip') or 'N/A'}\n")
     lines.append("\n")
 

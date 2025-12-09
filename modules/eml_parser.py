@@ -12,6 +12,8 @@ import hashlib
 from typing import List, Dict, Any, Optional
 from email import policy
 from email.parser import BytesParser
+from email.header import decode_header, make_header
+from email.utils import getaddresses
 from bs4 import BeautifulSoup
 
 # Regex robust enough to catch complex tracking URLs
@@ -20,25 +22,15 @@ URL_RE = re.compile(
     re.IGNORECASE
 )
 
-# do not extract cid function
 def _is_cid_url(u: str) -> bool:
     """
     Return True if the URL-like string is an inline/cid reference that should not be
     treated as an external URL (e.g., "cid:1234", "content-id:...").
+    Also skips data: and mailto: URIs.
     """
     if not u:
         return False
     u = str(u).strip().lower()
-    # common inline schemes: cid:, content-id:, data: (data: URIs are sometimes inline too)
-    if u.startswith("cid:") or u.startswith("content-id:"):
-        return True
-    # Optionally treat data: URIs as inline (image embedded inlined as base64). We avoid extracting those.
-    if u.startswith("data:"):
-        return True
-    if not u:
-        return False
-    u = str(u).strip().lower()
-    # common inline schemes or mailto
     if u.startswith("cid:") or u.startswith("content-id:"):
         return True
     if u.startswith("data:"):
@@ -65,7 +57,6 @@ def _decode_text(payload: Optional[str]) -> str:
         s = text.strip()
         if s and re.fullmatch(r"[A-Za-z0-9+/=\r\n]+", s) and len(s) % 4 == 0:
             decoded = base64.b64decode(s)
-            # only accept if mostly printable
             dec_str = decoded.decode("utf-8", errors="ignore")
             printable_ratio = sum(1 for c in dec_str if c.isprintable()) / max(1, len(dec_str))
             if printable_ratio > 0.8:
@@ -75,6 +66,14 @@ def _decode_text(payload: Optional[str]) -> str:
 
     return text
 
+def _decode_mime_header(value: Optional[str]) -> str:
+    """Decode MIME-encoded header like Subject, From, To."""
+    if not value:
+        return ""
+    try:
+        return str(make_header(decode_header(value)))
+    except Exception:
+        return value
 
 def extract_urls_from_html(html_data: str) -> List[str]:
     """Extract URLs from HTML content (tags + fallback regex). Skip inline/cid/data URIs."""
@@ -119,7 +118,6 @@ def extract_urls_from_html(html_data: str) -> List[str]:
         clean_urls.append(u)
     return list(dict.fromkeys(clean_urls))
 
-
 def extract_urls_from_text(text: str) -> List[str]:
     """Extract URLs from plain text body. Skip inline/cid/data URIs."""
     if not text:
@@ -136,14 +134,13 @@ def extract_urls_from_text(text: str) -> List[str]:
             continue
         u = html.unescape(u.strip().replace("\r", "").replace("\n", ""))
         u = u.replace("=3D", "=")
-        # skip cid/data/content-id URIs
+        # skip cid/data/content-id/mailto URIs
         if _is_cid_url(u):
             continue
         if u.startswith("www."):
             u = "http://" + u
         clean.append(u)
     return list(dict.fromkeys(clean))
-
 
 def _sha256_bytes(b: bytes) -> str:
     h = hashlib.sha256()
@@ -153,7 +150,7 @@ def _sha256_bytes(b: bytes) -> str:
 def parse_eml(file_path: str) -> Dict[str, Any]:
     """
     Parse EML and return a structured dict with:
-    - headers, from, subject, date, source_ip
+    - headers, from, to, subject, date, source_ip
     - body_text (preview), body_html (preview)
     - urls (list)
     - attachments: list of {filename, content_type, size, sha256, data}
@@ -161,12 +158,33 @@ def parse_eml(file_path: str) -> Dict[str, Any]:
     with open(file_path, "rb") as f:
         msg = BytesParser(policy=policy.default).parse(f)
 
+    # Raw headers
     headers = dict(msg.items())
-    from_header = msg.get("From", "") or ""
-    subject = msg.get("Subject", "") or ""
-    date = msg.get("Date", "") or ""
+
+    # Decode standard headers
+    from_header_raw = msg.get("From", "") or ""
+    subject_raw = msg.get("Subject", "") or ""
+    date_raw = msg.get("Date", "") or ""
+
+    from_header = _decode_mime_header(from_header_raw)
+    subject = _decode_mime_header(subject_raw)
+    date = _decode_mime_header(date_raw)
+
+    # ---- NEW: To header extraction ----
+    to_headers_raw = msg.get_all("To", []) or []
+    # getaddresses handles multiple "To" lines and "Name <addr>" format
+    to_parsed = getaddresses(to_headers_raw)
+    # just email addresses
+    to_emails = [addr for name, addr in to_parsed if addr]
+    # string form for your UI
+    to_str = ", ".join(to_emails)
+
     # X-BESS-Apparent-Source-IP compatibility
-    source_ip = headers.get("X-BESS-Apparent-Source-IP", "") or headers.get("X-BESS-Apparent-SourceIP", "") or ""
+    source_ip = (
+        headers.get("X-BESS-Apparent-Source-IP", "")
+        or headers.get("X-BESS-Apparent-SourceIP", "")
+        or ""
+    )
 
     body_text = ""
     body_html = ""
@@ -208,7 +226,6 @@ def parse_eml(file_path: str) -> Dict[str, Any]:
                         "data": b
                     })
                 except Exception:
-                    # best-effort: skip problematic attachment
                     continue
     else:
         # singlepart
@@ -234,6 +251,8 @@ def parse_eml(file_path: str) -> Dict[str, Any]:
 
     return {
         "from": from_header,
+        "to": to_str,              # <-- what Streamlit uses
+        "to_emails": to_emails,    # <-- extra, if you need pure list
         "subject": subject,
         "date": date,
         "source_ip": source_ip,
@@ -241,7 +260,7 @@ def parse_eml(file_path: str) -> Dict[str, Any]:
         "body_text": (body_text or "")[:2000],
         "body_html": (body_html or "")[:2000],
         "headers": headers,
-        "attachments": attachments
+        "attachments": attachments,
     }
 
 if __name__ == "__main__":
