@@ -12,13 +12,11 @@ Privacy-first attachments scanner.
       scan_attachment_bytes(name, data_bytes, api_key=None, debug=False) -> Dict[str, Any]
 """
 from __future__ import annotations
-
 import os
 import time
 import hashlib
 from typing import Dict, Any, Optional
 from pathlib import Path
-
 # Try to import CONFIG from project config (recommended)
 try:
     from config import CONFIG  # type: ignore
