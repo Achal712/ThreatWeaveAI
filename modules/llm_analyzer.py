@@ -257,7 +257,7 @@ def analyze_with_sage(context: Dict[str, Any]) -> Dict[str, Any]:
         ],
     }
 
-    headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+    headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json", "Accept": "application/json"}
     data = {
         "model": "gpt-5",
         "messages": [
